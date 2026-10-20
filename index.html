@@ -64,6 +64,7 @@ button { touch-action: manipulation; -webkit-appearance: none; appearance: none;
 
 .stage { position: relative; min-height: 0; }
 #plot { position: absolute; top: 0; right: 0; bottom: 0; left: 0; }
+#plot { touch-action: none; }
 #plot, #map { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
 .notice { display: flex; align-items: center; justify-content: center; height: 100%; padding: 24px; text-align: center; color: var(--sub); line-height: 1.6; }
 
@@ -241,6 +242,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--curve); out
   const MONO = 'JetBrains Mono, Menlo, monospace';
   const SCALE = [[0, '#1b3a6b'], [0.3, '#26709a'], [0.6, '#4fb3a0'], [0.85, '#b9dd8f'], [1, '#f6efa6']];
 
+  const AR = { x: 1.3, y: 1, z: 0.7 };
   const CAM = {
     '3d':   { eye: { x: 1.55, y: -1.55, z: 0.85 }, up: { x: 0, y: 0, z: 1 }, center: { x: 0.12, y: 0, z: -0.1 }, projection: { type: 'perspective' } },
     'top':  { eye: { x: 0, y: 0, z: 2.3 }, up: { x: 0, y: 1, z: 0 }, center: { x: 0, y: 0, z: 0 }, projection: { type: 'orthographic' } },
@@ -317,7 +319,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--curve); out
       uirevision: 'keep', paper_bgcolor: 'rgba(0,0,0,0)', margin: { l: 0, r: 0, t: 0, b: 0 }, showlegend: false,
       scene: {
         xaxis: axis('위험 σ', [0, 40]), yaxis: axis('기대수익률 E(r)', [0, 25]), zaxis: axis('효용 U', [zLo, zHi]),
-        aspectmode: 'manual', aspectratio: { x: 1.3, y: 1, z: 0.7 }, camera: CAM[st.view],
+        aspectmode: 'manual', aspectratio: Object.assign({}, AR), camera: CAM[st.view],
       },
       hoverlabel: { bgcolor: '#ffffff', bordercolor: 'rgba(16,32,51,0.15)', font: { family: MONO, color: ink, size: 12 } },
     };
@@ -356,16 +358,19 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--curve); out
   }
 
   let cam = CAM[st.view];
+  let ar = Object.assign({}, AR);
   let first = true;
   function render(resetCam) {
     const g = build3d();
     if (hasGL) {
-      if (resetCam) cam = CAM[st.view];
+      if (resetCam) { cam = CAM[st.view]; ar = Object.assign({}, AR); }
       else {
-        // 다시 그리기 직전, 화면에 보이는 카메라(투영 방식 포함)를 그대로 읽어 둔다
+        // 다시 그리기 직전, 화면에 보이는 카메라(투영 방식 포함)와 정사영 확대 배율(축 비율)을 그대로 읽어 둔다
         try { cam = JSON.parse(JSON.stringify($('plot')._fullLayout.scene._scene.getCamera())); } catch (e) {}
+        try { ar = Object.assign({}, $('plot').layout.scene.aspectratio); } catch (e) {}
       }
       g.layout.scene.camera = cam;
+      g.layout.scene.aspectratio = ar;
       // 위에서 볼 때 turntable은 극점에서 뒤집히므로 자유 회전(orbit) 사용
       g.layout.scene.dragmode = st.view === 'top' ? 'orbit' : 'turntable';
       if (first || resetCam) {
@@ -416,6 +421,40 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--curve); out
     Object.keys(vbtn).forEach(k2 => vbtn[k2].setAttribute('aria-pressed', String(k2 === k)));
     render(true);
   }));
+
+  // 두 손가락 핀치로 확대·축소 (Plotly 3D는 터치 핀치를 지원하지 않음): 카메라를 중심 쪽으로 당기거나 뺌
+  (() => {
+    const el = $('plot');
+    // 원근(입체)은 카메라 거리, 정사영(위에서·옆에서)은 Plotly 휠 확대와 같은 방식으로 축 비율(aspectratio)을 바꿈
+    let d0 = 0, eye0 = null, ctr = null, len0 = 1, ar0 = null, ortho = false, next = null, praf = 0;
+    const dist = t => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+    el.addEventListener('touchstart', e => {
+      if (!hasGL || e.touches.length !== 2) return;
+      let sc; try { sc = el._fullLayout.scene._scene; } catch (err) { return; }
+      if (!sc) return;
+      const c = sc.getCamera();
+      d0 = dist(e.touches) || 1; eye0 = c.eye; ctr = c.center; ortho = !!sc.camera._ortho;
+      len0 = Math.hypot(eye0.x - ctr.x, eye0.y - ctr.y, eye0.z - ctr.z) || 1;
+      ar0 = Object.assign({}, el.layout.scene.aspectratio);
+      e.preventDefault(); e.stopPropagation();
+    }, { capture: true, passive: false });
+    el.addEventListener('touchmove', e => {
+      if (!d0 || e.touches.length !== 2) return;
+      e.preventDefault(); e.stopPropagation();
+      const k = d0 / (dist(e.touches) || 1);   // 벌리면 < 1 (확대)
+      if (ortho) {
+        const s = Math.min(Math.max(ar0.x / AR.x / k, 0.4), 6) * AR.x / ar0.x;
+        next = { 'scene.aspectratio': { x: ar0.x * s, y: ar0.y * s, z: ar0.z * s } };
+      } else {
+        const q = Math.min(Math.max(k, 0.4 / len0), 8 / len0);
+        next = { 'scene.camera.eye': { x: ctr.x + (eye0.x - ctr.x) * q, y: ctr.y + (eye0.y - ctr.y) * q, z: ctr.z + (eye0.z - ctr.z) * q } };
+      }
+      if (!praf) praf = requestAnimationFrame(() => { praf = 0; Plotly.relayout(el, next); });
+    }, { capture: true, passive: false });
+    const end = e => { if (d0 && e.touches.length < 2) { d0 = 0; e.stopPropagation(); } };
+    el.addEventListener('touchend', end, { capture: true });
+    el.addEventListener('touchcancel', end, { capture: true });
+  })();
 
   // iOS는 앱 전환·잠금 후 WebGL을 회수해서 3D가 빈 화면이 될 수 있음 → 돌아오면 다시 그림
   const glLost = () => {
